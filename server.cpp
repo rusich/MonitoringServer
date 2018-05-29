@@ -116,7 +116,12 @@ quint64 Server::sendMessage(QTcpSocket *tcpSocket, QJsonObject *jsonReply)
            << "b C:" << compressedMessage.size()
            << "b R:" << (float) uncompressedMessage.size()/
               compressedMessage.size() << "%";
-    return tcpSocket->write(sendBuff);
+    if(tcpSocket->isOpen())
+    {
+        return tcpSocket->write(sendBuff);
+    }
+
+    return -1;
 }
 
 void Server::parseMessage(QJsonObject* jsonRequest, QTcpSocket* clientSocket)
@@ -126,18 +131,92 @@ void Server::parseMessage(QJsonObject* jsonRequest, QTcpSocket* clientSocket)
            << "]: "<<jsonToStr(*jsonRequest);
     QString requestUuid = jsonRequest->value("uuid").toString();
     QString requestType = jsonRequest->value("requestType").toString();
+    QJsonObject  request = jsonRequest->value("request").toObject();
+    QJsonObject* zabbixResult;
 
-    if(requestType == "zabbixSingleRequest")
+    if(requestType == "getHost")
     {
-           QJsonObject zr = jsonRequest->value("request").toObject();
-           QJsonObject* params = new QJsonObject(zr["params"].toObject());
-           QJsonObject* result = zabbix->zabbixRequest(zr["method"].toString()
-                   .toStdString().c_str(), params);
-           result->insert("uuid", requestUuid);
-           sendMessage(clientSocket, result);
+        QJsonObject hostRequest;
+        QJsonObject search;
+        QJsonArray hostOutput;
+        hostOutput<<"hostid"<<"host"<<"name";
+        search["host"] = request["host"];
+        hostRequest["search"] = search;
+        hostRequest["output"] = hostOutput;
+        hostRequest["selectInterfaces"] = QJsonArray({"ip"});
+
+        zabbixResult = zabbix->zabbixRequest( "host.get", &hostRequest);
+        QJsonObject* reply = new QJsonObject();
+        reply->insert("uuid", requestUuid);
+        reply->insert("replyType", "hostData");
+        QJsonObject host(zabbixResult->value("result").toArray().at(0).toObject());
+        QJsonObject replyData;
+        replyData["hostid"] = host["hostid"];
+        replyData["host"] = host["host"];
+        replyData["name"] = host["name"];
+        replyData["ip"] = host["interfaces"].toArray().at(0).toObject()["ip"];
+
+        QJsonObject itemsRequest;
+        QJsonArray itemsOutput;
+        // Какие эелменты из Item запрашивать
+        itemsOutput<<"itemid"<<"key_"<<"name"<<"description"<<"error"<<"state"<<"prevvalue"
+                  <<"lastvalue"<<"params"<<"units"<<"lastclock"<<"delay"<<"status";
+        itemsRequest["output"] = itemsOutput;
+
+        QJsonObject itemsFilter;
+        itemsFilter["hostid"] = replyData["hostid"];
+
+        QJsonArray  getItems = request["items"].toArray();
+        if(getItems.size()>0)
+        {
+            itemsFilter["key_"] = getItems;
+        }
+
+        itemsRequest["filter"] = itemsFilter;
+
+        QJsonArray items = zabbix->zabbixRequest("item.get", &itemsRequest)->value("result").toArray();
+
+        foreach (const QJsonValue &aItem, items) {
+            QJsonObject item = aItem.toObject();
+            //Преобразование данных. Нужно для того, чтобы в QML
+            //можно было обращаться к данным по названию ключа как к обычным
+            //свойствам (proprety). Необходимо заменить в названии ключа символы:
+            // [ ] , . /
+            QString key = item["key_"].toString();
+            key = key.replace(".","_");
+            key = key.replace("[]","");
+            key = key.replace("]","");
+            key = key.replace("[,,,","_");
+            key = key.replace("[,,","_");
+            key = key.replace("[,","_");
+            key = key.replace("[/,","_root_");
+            key = key.replace("[/","_");
+            key = key.replace("[","_");
+            key = key.replace(",","_");
+            key = key.replace("/","_");
+
+            // Преобразование параметра name (подстановка значений вместо $)
+            if(item["name"].toString().contains('$'))
+            {
+                QString keyTmp = item["key_"].toString();
+                keyTmp = keyTmp.split("[")[1];
+                keyTmp = keyTmp.split("]")[0];
+                QStringList keyParams = keyTmp.split(",");
+                QString itemName = item["name"].toString();
+                int num = itemName.split("$")[1].split(" ")[0].toInt();
+                itemName = itemName.replace(QString("$") +
+                                            QString::number(num),
+                                            keyParams[num>0?num-1:0]);
+                item["name"] = QJsonValue(itemName);
+            }
+            replyData[key]= item;
+        }
+
+        reply->insert("data", replyData);
+        sendMessage(clientSocket, reply);
     }
     else
     {
-        qDebug()<<"Unknown Request";
+        qDebug()<<"Unknown request:" <<requestType;
     }
 }
