@@ -116,7 +116,7 @@ quint64 Server::sendMessage(QTcpSocket *tcpSocket, QJsonObject *jsonReply)
            << "b C:" << compressedMessage.size()
            << "b R:" << (float) uncompressedMessage.size()/
               compressedMessage.size() << "%";
-    if(tcpSocket->isOpen())
+    if(clients.indexOf(tcpSocket)> -1 )
     {
         return tcpSocket->write(sendBuff);
     }
