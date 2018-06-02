@@ -1,5 +1,11 @@
 #include "server.h"
 #include <QTime>
+#include <QUrl>
+#include <QUrlQuery>
+#include <QNetworkReply>
+#include <QProcess>
+#include <QDir>
+#include <QDateTime>
 
 QString jsonToStr(QJsonObject obj)
 {
@@ -12,8 +18,9 @@ Server::Server(QObject *parent) : QObject(parent), nextMessageSize(0)
     settings = Settings::Instance();
     settings->readSettings();
     zabbix = new QZabbix(settings->ZabbixUser,settings->ZabbixPassword,
-                         settings->ZabbixURL);
+                         settings->ZabbixURL+"api_jsonrpc.php");
     zabbix->login();
+    qDebug()<<zabbix->getAuthStr();
 
     server = new QTcpServer();
     connect(server,SIGNAL(newConnection()),
@@ -29,6 +36,7 @@ Server::Server(QObject *parent) : QObject(parent), nextMessageSize(0)
     {
         qInfo()<<"Server started!";
     }
+
 }
 
 Server::~Server()
@@ -124,6 +132,122 @@ quint64 Server::sendMessage(QTcpSocket *tcpSocket, QJsonObject *jsonReply)
     return -1;
 }
 
+QJsonObject* Server::getHost(QJsonObject& request, QString requestUuid = "")
+{
+    QJsonObject* zabbixResult;
+    QJsonObject hostRequest;
+    QJsonObject search;
+    QJsonArray hostOutput;
+    hostOutput<<"hostid"<<"host"<<"name";
+    search["host"] = request["host"];
+    hostRequest["search"] = search;
+    hostRequest["output"] = hostOutput;
+    hostRequest["selectInterfaces"] = QJsonArray({"ip"});
+
+    zabbixResult = zabbix->zabbixRequest( "host.get", &hostRequest);
+    QJsonObject* reply = new QJsonObject();
+    reply->insert("uuid", requestUuid);
+    reply->insert("replyType", "hostData");
+    QJsonObject host(zabbixResult->value("result").toArray().at(0).toObject());
+    QJsonObject replyData;
+    replyData["hostid"] = host["hostid"];
+    replyData["host"] = host["host"];
+    replyData["name"] = host["name"];
+    replyData["ip"] = host["interfaces"].toArray().at(0).toObject()["ip"];
+
+    QJsonObject itemsRequest;
+    QJsonArray itemsOutput;
+    // Какие эелменты из Item запрашивать
+    itemsOutput<<"itemid"<<"key_"<<"name"<<"description"<<"error"<<"state"<<"prevvalue"
+              <<"lastvalue"<<"params"<<"units"<<"lastclock"<<"delay"<<"status";
+    itemsRequest["output"] = itemsOutput;
+
+    QJsonObject itemsFilter;
+    itemsFilter["hostid"] = replyData["hostid"];
+
+    QJsonArray  getItems = request["items"].toArray();
+    if(getItems.size()>0)
+    {
+        itemsFilter["key_"] = getItems;
+    }
+
+    itemsRequest["filter"] = itemsFilter;
+
+    QJsonArray items = zabbix->zabbixRequest("item.get", &itemsRequest)->value("result").toArray();
+
+    foreach (const QJsonValue &aItem, items) {
+        QJsonObject item = aItem.toObject();
+        //Преобразование данных. Нужно для того, чтобы в QML
+        //можно было обращаться к данным по названию ключа как к обычным
+        //свойствам (proprety). Необходимо заменить в названии ключа символы:
+        // [ ] , . /
+        QString key = item["key_"].toString();
+//            key = key.replace(".","_");
+//            key = key.replace("[]","");
+//            key = key.replace("]","");
+//            key = key.replace("[,,,","_");
+//            key = key.replace("[,,","_");
+//            key = key.replace("[,","_");
+//            key = key.replace("[/,","_root_");
+//            key = key.replace("[/","_");
+//            key = key.replace("[","_");
+//            key = key.replace(",","_");
+//            key = key.replace("/","_");
+
+        // Преобразование параметра name (подстановка значений вместо $)
+        if(item["name"].toString().contains('$'))
+        {
+            QString keyTmp = item["key_"].toString();
+            keyTmp = keyTmp.split("[")[1];
+            keyTmp = keyTmp.split("]")[0];
+            QStringList keyParams = keyTmp.split(",");
+            QString itemName = item["name"].toString();
+            int num = itemName.split("$")[1].split(" ")[0].toInt();
+            itemName = itemName.replace(QString("$") +
+                                        QString::number(num),
+                                        keyParams[num>0?num-1:0]);
+            item["name"] = QJsonValue(itemName);
+        }
+        replyData[key]= item;
+    }
+
+    reply->insert("data", replyData);
+    return reply;
+}
+
+QJsonObject *Server::getGraph(QJsonObject &request, QString requestUuid)
+{
+
+    QJsonObject* zabbixResult;
+    QJsonObject graphRequest;
+    QJsonArray graphOutput;
+    graphOutput<<"graphid"<<"name";
+    graphRequest["graphids"] = request["graphid"];
+    graphRequest["output"] = graphOutput;
+
+    zabbixResult = zabbix->zabbixRequest( "graph.get", &graphRequest);
+    QJsonObject* reply = new QJsonObject();
+    reply->insert("uuid", requestUuid);
+    reply->insert("replyType", "graphData");
+    QJsonObject graph(zabbixResult->value("result").toArray().at(0).toObject());
+    QJsonObject replyData;
+    replyData["graphid"] = graph["graphid"];
+    replyData["name"] = graph["name"];
+    if(replyData["graphid"].toString().trimmed()!="")
+    {
+        QByteArray graphData =this->getGraphImage(replyData["graphid"].toString(),
+                QString::number(request["period"].toInt()),
+                QString::number(request["width"].toInt()),
+                QString::number(request["height"].toInt()));
+        replyData["data"] = QJsonValue(QString::fromUtf8(graphData.toBase64()));
+    }
+    uint timestamp = QDateTime::currentDateTime().toTime_t();
+    replyData["clock"] = QJsonValue::fromVariant(timestamp);
+    reply->insert("data",replyData);
+
+    return reply;
+}
+
 void Server::parseMessage(QJsonObject* jsonRequest, QTcpSocket* clientSocket)
 {
     qDebug()<<"RECV["
@@ -132,91 +256,37 @@ void Server::parseMessage(QJsonObject* jsonRequest, QTcpSocket* clientSocket)
     QString requestUuid = jsonRequest->value("uuid").toString();
     QString requestType = jsonRequest->value("requestType").toString();
     QJsonObject  request = jsonRequest->value("request").toObject();
-    QJsonObject* zabbixResult;
+
+    QJsonObject* reply = nullptr;
 
     if(requestType == "getHost")
     {
-        QJsonObject hostRequest;
-        QJsonObject search;
-        QJsonArray hostOutput;
-        hostOutput<<"hostid"<<"host"<<"name";
-        search["host"] = request["host"];
-        hostRequest["search"] = search;
-        hostRequest["output"] = hostOutput;
-        hostRequest["selectInterfaces"] = QJsonArray({"ip"});
-
-        zabbixResult = zabbix->zabbixRequest( "host.get", &hostRequest);
-        QJsonObject* reply = new QJsonObject();
-        reply->insert("uuid", requestUuid);
-        reply->insert("replyType", "hostData");
-        QJsonObject host(zabbixResult->value("result").toArray().at(0).toObject());
-        QJsonObject replyData;
-        replyData["hostid"] = host["hostid"];
-        replyData["host"] = host["host"];
-        replyData["name"] = host["name"];
-        replyData["ip"] = host["interfaces"].toArray().at(0).toObject()["ip"];
-
-        QJsonObject itemsRequest;
-        QJsonArray itemsOutput;
-        // Какие эелменты из Item запрашивать
-        itemsOutput<<"itemid"<<"key_"<<"name"<<"description"<<"error"<<"state"<<"prevvalue"
-                  <<"lastvalue"<<"params"<<"units"<<"lastclock"<<"delay"<<"status";
-        itemsRequest["output"] = itemsOutput;
-
-        QJsonObject itemsFilter;
-        itemsFilter["hostid"] = replyData["hostid"];
-
-        QJsonArray  getItems = request["items"].toArray();
-        if(getItems.size()>0)
-        {
-            itemsFilter["key_"] = getItems;
-        }
-
-        itemsRequest["filter"] = itemsFilter;
-
-        QJsonArray items = zabbix->zabbixRequest("item.get", &itemsRequest)->value("result").toArray();
-
-        foreach (const QJsonValue &aItem, items) {
-            QJsonObject item = aItem.toObject();
-            //Преобразование данных. Нужно для того, чтобы в QML
-            //можно было обращаться к данным по названию ключа как к обычным
-            //свойствам (proprety). Необходимо заменить в названии ключа символы:
-            // [ ] , . /
-            QString key = item["key_"].toString();
-            key = key.replace(".","_");
-            key = key.replace("[]","");
-            key = key.replace("]","");
-            key = key.replace("[,,,","_");
-            key = key.replace("[,,","_");
-            key = key.replace("[,","_");
-            key = key.replace("[/,","_root_");
-            key = key.replace("[/","_");
-            key = key.replace("[","_");
-            key = key.replace(",","_");
-            key = key.replace("/","_");
-
-            // Преобразование параметра name (подстановка значений вместо $)
-            if(item["name"].toString().contains('$'))
-            {
-                QString keyTmp = item["key_"].toString();
-                keyTmp = keyTmp.split("[")[1];
-                keyTmp = keyTmp.split("]")[0];
-                QStringList keyParams = keyTmp.split(",");
-                QString itemName = item["name"].toString();
-                int num = itemName.split("$")[1].split(" ")[0].toInt();
-                itemName = itemName.replace(QString("$") +
-                                            QString::number(num),
-                                            keyParams[num>0?num-1:0]);
-                item["name"] = QJsonValue(itemName);
-            }
-            replyData[key]= item;
-        }
-
-        reply->insert("data", replyData);
-        sendMessage(clientSocket, reply);
+        reply = getHost(request, requestUuid);
+    }
+    else if(requestType == "getGraph")
+    {
+        reply = getGraph(request, requestUuid);
     }
     else
     {
-        qDebug()<<"Unknown request:" <<requestType;
+        qDebug()<<"Unknown request:" <<requestUuid<<requestType<<request;
     }
+
+    if(reply!=nullptr) sendMessage(clientSocket, reply);
+}
+
+//Использует внешний скрипт для аутентификации и получения графика с помощью WGET
+QByteArray Server::getGraphImage(QString graphid, QString period,
+                                 QString width, QString height)
+{
+    QString program = QCoreApplication::applicationDirPath()+
+            QDir::separator()+"get_chart.sh";
+    QStringList arguments;
+    arguments << settings->ZabbixURL<< settings->ZabbixUser
+              <<settings->ZabbixPassword<<graphid<<period<<width<<height;
+    QProcess *myProcess = new QProcess();
+    myProcess->start(program, arguments);
+    myProcess->waitForFinished();
+    QByteArray graph = myProcess->readAll();
+    return graph;
 }

@@ -39,6 +39,10 @@ private:
     QList<QTcpSocket*> clients;
     QTcpServer *server;
     Settings* settings;
+    QByteArray getGraphImage(QString graphid, QString period,
+                             QString width, QString height);
+    QJsonObject* getHost(QJsonObject& request, QString requestUuid);
+    QJsonObject* getGraph(QJsonObject& request, QString requestUuid);
 
 };
 

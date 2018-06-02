@@ -12,6 +12,7 @@ Settings *Settings::Instance()
     return _instance ;
 }
 
+
 void Settings::readSettings()
 {
     QCoreApplication::setOrganizationName(OrganizationName);

@@ -26,4 +26,4 @@ HEADERS += \
     settings.h
 INCLUDEPATH += ../libqzabbix
 DEPENDPATH += ../libqzabbix
-LIBS *=-L../build-libqzabbix-Desktop_Qt_5_10_1_GCC_64bit-Debug -lqzabbix
+LIBS *=-L../build-libqzabbix-Desktop_Qt_5_11_0_GCC_64bit-Debug -lqzabbix
