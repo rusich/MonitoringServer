@@ -177,22 +177,7 @@ QJsonObject* Server::getHost(QJsonObject& request, QString requestUuid = "")
 
     foreach (const QJsonValue &aItem, items) {
         QJsonObject item = aItem.toObject();
-        //Преобразование данных. Нужно для того, чтобы в QML
-        //можно было обращаться к данным по названию ключа как к обычным
-        //свойствам (proprety). Необходимо заменить в названии ключа символы:
-        // [ ] , . /
         QString key = item["key_"].toString();
-//            key = key.replace(".","_");
-//            key = key.replace("[]","");
-//            key = key.replace("]","");
-//            key = key.replace("[,,,","_");
-//            key = key.replace("[,,","_");
-//            key = key.replace("[,","_");
-//            key = key.replace("[/,","_root_");
-//            key = key.replace("[/","_");
-//            key = key.replace("[","_");
-//            key = key.replace(",","_");
-//            key = key.replace("/","_");
 
         // Преобразование параметра name (подстановка значений вместо $)
         if(item["name"].toString().contains('$'))
@@ -208,8 +193,32 @@ QJsonObject* Server::getHost(QJsonObject& request, QString requestUuid = "")
                                         keyParams[num>0?num-1:0]);
             item["name"] = QJsonValue(itemName);
         }
-        replyData[key]= item;
+        replyData[key] = item;
     }
+
+    QJsonObject triggersRequest;
+    QJsonObject triggersFilter;
+    triggersFilter["value"] = 1;
+    triggersRequest["host"] = replyData["host"];
+    triggersRequest["filter"] = triggersFilter;
+    triggersRequest["countOutput"] = "true";
+    zabbixResult = zabbix->zabbixRequest("trigger.get", &triggersRequest);
+    int triggersCount = zabbixResult->value("result").toString().toInt();
+    replyData["triggersCount"] = triggersCount;
+
+    if(triggersCount>0)
+    {
+        triggersRequest.remove("countOutput");
+        QJsonArray triggerOutput;
+        triggerOutput<<"lastchange"<<"description"<<"comment"
+                    <<"templateid";
+        triggersRequest["output"] = triggerOutput;
+        triggersRequest["expandDescription"] = true;
+        triggersRequest["expandComment"] = true;
+        zabbixResult = zabbix->zabbixRequest("trigger.get", &triggersRequest);
+        replyData["triggers"] = zabbixResult->value("result").toArray();
+    }
+
 
     reply->insert("data", replyData);
     return reply;
