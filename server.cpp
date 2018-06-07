@@ -20,6 +20,11 @@ Server::Server(QObject *parent) : QObject(parent), nextMessageSize(0)
     zabbix = new QZabbix(settings->ZabbixUser,settings->ZabbixPassword,
                          settings->ZabbixURL+"api_jsonrpc.php");
     zabbix->login();
+    if(!zabbix->isLoggedOn())
+    {
+        qDebug()<<"Could not connect to Zabbix server. Exiting.";
+        qApp->exit(-1);
+    }
     qDebug()<<zabbix->getAuthStr();
 
     server = new QTcpServer();
@@ -257,6 +262,56 @@ QJsonObject *Server::getGraph(QJsonObject &request, QString requestUuid)
     return reply;
 }
 
+QJsonObject *Server::getGroups(QJsonObject &request, QString requestUuid)
+{
+    QJsonObject* zabbixResult;
+    QJsonObject groupsRequest;
+    groupsRequest["real_hosts"] = "true"; // Возвращять группы в которх есть хосты
+
+    zabbixResult = zabbix->zabbixRequest( "hostgroup.get", &groupsRequest);
+    QJsonObject* reply = new QJsonObject();
+
+    reply->insert("uuid", requestUuid);
+    reply->insert("replyType", "groupsData");
+
+    QJsonObject replyData;
+    QJsonArray groups(zabbixResult->value("result").toArray());
+
+    for(int i=0; i<groups.size();i++)
+    {
+        replyData[groups.at(i).toObject().value("name").toString()] =
+                QJsonObject(groups.at(i).toObject());
+    }
+
+    QJsonObject triggersByGroup;
+    QJsonObject triggersFilter;
+    triggersFilter["value"] = 1;
+    triggersByGroup["countOutput"] = "true";
+    triggersByGroup["filter"] = triggersFilter;
+
+    for(int i=0; i<groups.size();i++)
+    {
+        QString groupName = groups.at(i).toObject().value("name").toString();
+        triggersByGroup["group"] = groupName;
+        zabbixResult = zabbix->zabbixRequest("trigger.get", &triggersByGroup);
+        QString triggersCount = zabbixResult->value("result").toString();
+        QJsonObject tmp = replyData[groupName].toObject();
+        tmp["triggersCount"] = triggersCount;
+
+        QJsonObject hostsCountByGroupId;
+        hostsCountByGroupId["countOutput"] = "true";
+        hostsCountByGroupId["groupids"] = tmp["groupid"];
+        zabbixResult = zabbix->zabbixRequest("host.get", &hostsCountByGroupId);
+        QString hostsCount = zabbixResult->value("result").toString();
+        tmp["hostsCount"] = hostsCount;
+
+        replyData[groupName] = tmp;
+    }
+
+    reply->insert("data",replyData);
+    return reply;
+}
+
 void Server::parseMessage(QJsonObject* jsonRequest, QTcpSocket* clientSocket)
 {
     qDebug()<<"RECV["
@@ -276,9 +331,19 @@ void Server::parseMessage(QJsonObject* jsonRequest, QTcpSocket* clientSocket)
     {
         reply = getGraph(request, requestUuid);
     }
+    else if(requestType == "getGroups")
+    {
+        reply = getGroups(request, requestUuid);
+    }
     else
     {
         qDebug()<<"Unknown request:" <<requestUuid<<requestType<<request;
+        reply = new QJsonObject();
+        reply->insert("replyType","error");
+        QJsonObject replyData;
+        replyData["errorId"] = 1;
+        replyData["errorMsg"] = QString("Неизвестный тип запроса: "+requestType);
+        reply->insert("data",replyData);
     }
 
     if(reply!=nullptr) sendMessage(clientSocket, reply);

@@ -43,6 +43,7 @@ private:
                              QString width, QString height);
     QJsonObject* getHost(QJsonObject& request, QString requestUuid);
     QJsonObject* getGraph(QJsonObject& request, QString requestUuid);
+    QJsonObject* getGroups(QJsonObject& request, QString requestUuid);
 
 };
 
