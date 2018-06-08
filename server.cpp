@@ -160,45 +160,56 @@ QJsonObject* Server::getHost(QJsonObject& request, QString requestUuid = "")
     replyData["name"] = host["name"];
     replyData["ip"] = host["interfaces"].toArray().at(0).toObject()["ip"];
 
-    QJsonObject itemsRequest;
+    //Items
     QJsonArray itemsOutput;
+    QJsonObject itemsRequest;
+    QJsonObject itemsFilter;
     // Какие эелменты из Item запрашивать
     itemsOutput<<"itemid"<<"key_"<<"name"<<"description"<<"error"<<"state"<<"prevvalue"
               <<"lastvalue"<<"params"<<"units"<<"lastclock"<<"delay"<<"status";
+    itemsFilter["hostid"] = replyData["hostid"];
     itemsRequest["output"] = itemsOutput;
 
-    QJsonObject itemsFilter;
-    itemsFilter["hostid"] = replyData["hostid"];
-
-    QJsonArray  getItems = request["items"].toArray();
-    if(getItems.size()>0)
-    {
-        itemsFilter["key_"] = getItems;
+    if(request.contains("summary")) {
+        itemsFilter["key_"] = "icmpping";
+        itemsRequest["filter"] = itemsFilter;
+        QJsonObject icmpping = zabbix->zabbixRequest("item.get", &itemsRequest)->
+                value("result").toArray().at(0).toObject();
+        replyData["icmpping"] = icmpping;
+        replyData["summary"] = "true";
     }
+    else {
 
-    itemsRequest["filter"] = itemsFilter;
-
-    QJsonArray items = zabbix->zabbixRequest("item.get", &itemsRequest)->value("result").toArray();
-
-    foreach (const QJsonValue &aItem, items) {
-        QJsonObject item = aItem.toObject();
-        QString key = item["key_"].toString();
-
-        // Преобразование параметра name (подстановка значений вместо $)
-        if(item["name"].toString().contains('$'))
+        QJsonArray  getItems = request["items"].toArray();
+        if(getItems.size()>0)
         {
-            QString keyTmp = item["key_"].toString();
-            keyTmp = keyTmp.split("[")[1];
-            keyTmp = keyTmp.split("]")[0];
-            QStringList keyParams = keyTmp.split(",");
-            QString itemName = item["name"].toString();
-            int num = itemName.split("$")[1].split(" ")[0].toInt();
-            itemName = itemName.replace(QString("$") +
-                                        QString::number(num),
-                                        keyParams[num>0?num-1:0]);
-            item["name"] = QJsonValue(itemName);
+            itemsFilter["key_"] = getItems;
         }
-        replyData[key] = item;
+
+        itemsRequest["filter"] = itemsFilter;
+
+        QJsonArray items = zabbix->zabbixRequest("item.get", &itemsRequest)->value("result").toArray();
+
+        foreach (const QJsonValue &aItem, items) {
+            QJsonObject item = aItem.toObject();
+            QString key = item["key_"].toString();
+
+            // Преобразование параметра name (подстановка значений вместо $)
+            if(item["name"].toString().contains('$'))
+            {
+                QString keyTmp = item["key_"].toString();
+                keyTmp = keyTmp.split("[")[1];
+                keyTmp = keyTmp.split("]")[0];
+                QStringList keyParams = keyTmp.split(",");
+                QString itemName = item["name"].toString();
+                int num = itemName.split("$")[1].split(" ")[0].toInt();
+                itemName = itemName.replace(QString("$") +
+                                            QString::number(num),
+                                            keyParams[num>0?num-1:0]);
+                item["name"] = QJsonValue(itemName);
+            }
+            replyData[key] = item;
+        }
     }
 
     QJsonObject triggersRequest;
@@ -211,7 +222,7 @@ QJsonObject* Server::getHost(QJsonObject& request, QString requestUuid = "")
     int triggersCount = zabbixResult->value("result").toString().toInt();
     replyData["triggersCount"] = triggersCount;
 
-    if(triggersCount>0)
+    if(triggersCount>0 && !request.contains("summary"))
     {
         triggersRequest.remove("countOutput");
         QJsonArray triggerOutput;
