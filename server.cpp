@@ -15,6 +15,7 @@ QString jsonToStr(QJsonObject obj)
 
 Server::Server(QObject *parent) : QObject(parent), nextMessageSize(0)
 {
+    qDebug()<<"Constructor";
     settings = Settings::Instance();
     settings->readSettings();
     zabbix = new QZabbix(settings->ZabbixUser,settings->ZabbixPassword,
@@ -42,6 +43,7 @@ Server::Server(QObject *parent) : QObject(parent), nextMessageSize(0)
         qInfo()<<"Server started!";
     }
 
+    qDebug()<<"Constructor end";
 }
 
 Server::~Server()
@@ -51,11 +53,13 @@ Server::~Server()
 
 QList<QTcpSocket*> Server::getClients()
 {
+    qDebug()<<"getClients";
     return clients;
 }
 
 void Server::newConnection()
 {
+    qDebug()<<"newConnection";
     QTcpSocket* clientSocket = server->nextPendingConnection();
     qDebug()<<"Client connected["
            << clientSocket->socketDescriptor()
@@ -63,19 +67,21 @@ void Server::newConnection()
            << ":"<<clientSocket->peerPort();
 
     connect(clientSocket, SIGNAL(disconnected()),
-            clientSocket,SLOT(deleteLater()));
-    connect(clientSocket, SIGNAL(disconnected()),
             this,SLOT(gotDisconnection()));
+    connect(clientSocket, SIGNAL(disconnected()),
+            clientSocket,SLOT(deleteLater()));
     connect(clientSocket, SIGNAL(readyRead()),
             this, SLOT(readMessage()));
 
     clients<<clientSocket;
 
+    qDebug()<<"newConnection end";
     //    sendMessage(clientSocket, "Reply: connection established");
 }
 
 void Server::readMessage()
 {
+    qDebug()<<"readMessage";
     QTcpSocket* clientSocket = (QTcpSocket*)sender();
     QDataStream in(clientSocket);
 
@@ -83,6 +89,11 @@ void Server::readMessage()
     {
         if (!nextMessageSize)
         {
+            if(clients.indexOf(clientSocket)== -1) {
+//                qDebug()<<"ERROR: Client disconnected on readMessage";
+              return;
+            }
+
             if ((quint64)clientSocket->bytesAvailable() < sizeof(quint16)) { break; }
             in >> nextMessageSize;
         }
@@ -101,22 +112,27 @@ void Server::readMessage()
         nextMessageSize = 0;
 
     }
+    qDebug()<<"readMessage end";
 }
 
 void Server::gotDisconnection()
 {
+    qDebug()<<"gotDisc";
     QTcpSocket* clientSocket = (QTcpSocket*)sender();
     qDebug()<<"Client disconnected["
            << clientSocket->socketDescriptor()
            << "]: "<<clientSocket->peerAddress().toString()
            << ":"<<clientSocket->peerPort();
+    clientSocket->disconnect();
+    clientSocket->disconnectFromHost();
     clients.removeAt(clients.indexOf(clientSocket));
-    emit disconnected();
+    qDebug()<<"gotDisc end";
 }
 
 
-quint64 Server::sendMessage(QTcpSocket *tcpSocket, QJsonObject *jsonReply)
+quint64 Server::sendMessage(QTcpSocket *clientSocket, QJsonObject *jsonReply)
 {
+    qDebug()<<"sm";
     QByteArray sendBuff;
     QDataStream out(&sendBuff, QIODevice::WriteOnly);
     QJsonDocument jsonDoc(*jsonReply);
@@ -125,20 +141,24 @@ quint64 Server::sendMessage(QTcpSocket *tcpSocket, QJsonObject *jsonReply)
     out << quint16(0) << compressedMessage;
     out.device()->seek(0);
     out << quint16(sendBuff.size() - sizeof(quint16));
-    qDebug()<<"SEND: U:"<<uncompressedMessage.size()
-           << "b C:" << compressedMessage.size()
-           << "b R:" << (float) uncompressedMessage.size()/
-              compressedMessage.size() << "%";
-    if(clients.indexOf(tcpSocket)> -1 )
+
+    if(clients.indexOf(clientSocket)> -1 )
     {
-        return tcpSocket->write(sendBuff);
+        qDebug()<<"SEND: U:"<<uncompressedMessage.size()
+               << "b C:" << compressedMessage.size()
+               << "b R:" << (float) uncompressedMessage.size()/
+                  compressedMessage.size() << "%";
+         return clientSocket->write(sendBuff);
     }
 
-    return -1;
+
+    qDebug()<<"sm end";
+    return 0;
 }
 
 QJsonObject* Server::getHost(QJsonObject& request, QString requestUuid = "")
 {
+    qDebug()<<"getHost";
     QJsonObject* zabbixResult;
     QJsonObject hostRequest;
     QJsonObject search;
@@ -237,12 +257,13 @@ QJsonObject* Server::getHost(QJsonObject& request, QString requestUuid = "")
 
 
     reply->insert("data", replyData);
+    qDebug()<<"getHost end";
     return reply;
 }
 
 QJsonObject *Server::getGraph(QJsonObject &request, QString requestUuid)
 {
-
+    qDebug()<<"getGraph";
     QJsonObject* zabbixResult;
     QJsonObject graphRequest;
     QJsonArray graphOutput;
@@ -275,6 +296,7 @@ QJsonObject *Server::getGraph(QJsonObject &request, QString requestUuid)
 
 QJsonObject *Server::getGroups(QJsonObject &request, QString requestUuid)
 {
+    qDebug()<<"getGroups";
     QJsonObject* zabbixResult;
     QJsonObject groupsRequest;
     groupsRequest["real_hosts"] = "true"; // Возвращять группы в которх есть хосты
@@ -320,11 +342,13 @@ QJsonObject *Server::getGroups(QJsonObject &request, QString requestUuid)
     }
 
     reply->insert("data",replyData);
+    qDebug()<<"getGroups end";
     return reply;
 }
 
 void Server::parseMessage(QJsonObject* jsonRequest, QTcpSocket* clientSocket)
 {
+    qDebug()<<"parseMessage";
     qDebug()<<"RECV["
            << clientSocket->socketDescriptor()
            << "]: "<<jsonToStr(*jsonRequest);
@@ -357,13 +381,18 @@ void Server::parseMessage(QJsonObject* jsonRequest, QTcpSocket* clientSocket)
         reply->insert("data",replyData);
     }
 
-    if(reply!=nullptr) sendMessage(clientSocket, reply);
+    if(reply!=nullptr)
+    {
+            sendMessage(clientSocket, reply);
+    }
+    qDebug()<<"parseMessage end";
 }
 
 //Использует внешний скрипт для аутентификации и получения графика с помощью WGET
 QByteArray Server::getGraphImage(QString graphid, QString period,
                                  QString width, QString height)
 {
+    qDebug()<<"getGraphImage";
     QString program = QCoreApplication::applicationDirPath()+
             QDir::separator()+"get_chart.sh";
     QStringList arguments;

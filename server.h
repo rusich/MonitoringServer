@@ -26,7 +26,7 @@ public slots:
     virtual void newConnection();
     void readMessage();
     void gotDisconnection();
-    quint64 sendMessage(QTcpSocket* socket, QJsonObject* jsonReply);
+    quint64 sendMessage(QTcpSocket* clientSocket, QJsonObject* jsonReply);
 private slots:
     void parseMessage(QJsonObject* jsonRequest, QTcpSocket* clientSocket);
 signals:
