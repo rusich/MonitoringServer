@@ -1,5 +1,5 @@
 QT -= gui
-QT += core network
+QT += core network sql
 
 CONFIG += c++11 console
 CONFIG -= app_bundle
@@ -23,7 +23,8 @@ DISTFILES +=
 
 HEADERS += \
     server.h \
-    settings.h
+    settings.h \
+    errors.h
 INCLUDEPATH += ../libqzabbix
 DEPENDPATH += ../libqzabbix
 LIBS *=-L../build-libqzabbix-Desktop_Qt_5_11_0_GCC_64bit-Debug -lqzabbix

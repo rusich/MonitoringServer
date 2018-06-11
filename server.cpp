@@ -16,6 +16,14 @@ QString jsonToStr(QJsonObject obj)
 Server::Server(QObject *parent) : QObject(parent), nextMessageSize(0)
 {
     qDebug()<<"Constructor";
+    QSqlDatabase sdb = QSqlDatabase::addDatabase("QSQLITE");
+    sdb.setConnectOptions();
+    sdb.setDatabaseName("db.sqlite");
+
+    if (!sdb.open()) {
+        qCritical() << sdb.lastError().text();
+        qApp->exit(1);
+    }
     settings = Settings::Instance();
     settings->readSettings();
     zabbix = new QZabbix(settings->ZabbixUser,settings->ZabbixPassword,
@@ -24,7 +32,7 @@ Server::Server(QObject *parent) : QObject(parent), nextMessageSize(0)
     if(!zabbix->isLoggedOn())
     {
         qDebug()<<"Could not connect to Zabbix server. Exiting.";
-        qApp->exit(-1);
+        qApp->exit(2);
     }
     qDebug()<<zabbix->getAuthStr();
 
@@ -48,13 +56,14 @@ Server::Server(QObject *parent) : QObject(parent), nextMessageSize(0)
 
 Server::~Server()
 {
+    sdb.close();
     qInfo()<<"Server shutdown. Bye.";
 }
 
 QList<QTcpSocket*> Server::getClients()
 {
     qDebug()<<"getClients";
-    return clients;
+    return connectins;
 }
 
 void Server::newConnection()
@@ -73,7 +82,7 @@ void Server::newConnection()
     connect(clientSocket, SIGNAL(readyRead()),
             this, SLOT(readMessage()));
 
-    clients<<clientSocket;
+    connectins<<clientSocket;
 
     qDebug()<<"newConnection end";
     //    sendMessage(clientSocket, "Reply: connection established");
@@ -89,9 +98,9 @@ void Server::readMessage()
     {
         if (!nextMessageSize)
         {
-            if(clients.indexOf(clientSocket)== -1) {
-//                qDebug()<<"ERROR: Client disconnected on readMessage";
-              return;
+            if(connectins.indexOf(clientSocket)== -1) {
+                //                qDebug()<<"ERROR: Client disconnected on readMessage";
+                return;
             }
 
             if ((quint64)clientSocket->bytesAvailable() < sizeof(quint16)) { break; }
@@ -125,7 +134,8 @@ void Server::gotDisconnection()
            << ":"<<clientSocket->peerPort();
     clientSocket->disconnect();
     clientSocket->disconnectFromHost();
-    clients.removeAt(clients.indexOf(clientSocket));
+    connectins.removeAt(connectins.indexOf(clientSocket));
+    authorizedClients.remove(clientSocket);
     qDebug()<<"gotDisc end";
 }
 
@@ -142,13 +152,13 @@ quint64 Server::sendMessage(QTcpSocket *clientSocket, QJsonObject *jsonReply)
     out.device()->seek(0);
     out << quint16(sendBuff.size() - sizeof(quint16));
 
-    if(clients.indexOf(clientSocket)> -1 )
+    if(connectins.indexOf(clientSocket)> -1 )
     {
         qDebug()<<"SEND: U:"<<uncompressedMessage.size()
                << "b C:" << compressedMessage.size()
                << "b R:" << (float) uncompressedMessage.size()/
                   compressedMessage.size() << "%";
-         return clientSocket->write(sendBuff);
+        return clientSocket->write(sendBuff);
     }
 
 
@@ -156,9 +166,33 @@ quint64 Server::sendMessage(QTcpSocket *clientSocket, QJsonObject *jsonReply)
     return 0;
 }
 
-QJsonObject* Server::getHost(QJsonObject& request, QString requestUuid = "")
+QJsonObject* Server::getHost(QJsonObject& request, QString requestUuid = "", QTcpSocket *clientSocket)
 {
     qDebug()<<"getHost";
+
+    QSqlQuery q;
+    QString qTxt = QString(
+                "select AclId from ACL inner join Users on ACL.UserId = "
+                "Users.UserId inner join Hosts on ACL.HostID = Hosts.HostId "
+                "where Users.Username = '%1' AND Hosts.Host = '%2'")
+            .arg(authorizedClients.value(clientSocket))
+            .arg(request["host"].toString()
+            );
+    q.exec(qTxt);
+
+    qDebug()<<qTxt;
+    QSqlRecord rec = q.record();
+    int recCount=0;
+    while (q.next()) {
+        recCount++;
+    }
+
+    if(recCount==0) {
+        qDebug()<<qTxt;
+        sendError(clientSocket, ErrorType::HostAccessDenied, &request);
+        return nullptr;
+    }
+
     QJsonObject* zabbixResult;
     QJsonObject hostRequest;
     QJsonObject search;
@@ -170,6 +204,11 @@ QJsonObject* Server::getHost(QJsonObject& request, QString requestUuid = "")
     hostRequest["selectInterfaces"] = QJsonArray({"ip"});
 
     zabbixResult = zabbix->zabbixRequest( "host.get", &hostRequest);
+    if(zabbixResult->value("result").toObject().count()==0) {
+        sendError(clientSocket, ErrorType::NoSuchHost, &request);
+        return nullptr;
+    }
+
     QJsonObject* reply = new QJsonObject();
     reply->insert("uuid", requestUuid);
     reply->insert("replyType", "hostData");
@@ -354,13 +393,18 @@ void Server::parseMessage(QJsonObject* jsonRequest, QTcpSocket* clientSocket)
            << "]: "<<jsonToStr(*jsonRequest);
     QString requestUuid = jsonRequest->value("uuid").toString();
     QString requestType = jsonRequest->value("requestType").toString();
-    QJsonObject  request = jsonRequest->value("request").toObject();
+    if(!authorizedClients.contains(clientSocket) && requestType!="auth")
+    {
+        sendError(clientSocket, ErrorType::NotAuthorized);
+        return;
+    }
 
+    QJsonObject  request = jsonRequest->value("request").toObject();
     QJsonObject* reply = nullptr;
 
     if(requestType == "getHost")
     {
-        reply = getHost(request, requestUuid);
+        reply = getHost(request, requestUuid, clientSocket);
     }
     else if(requestType == "getGraph")
     {
@@ -370,23 +414,115 @@ void Server::parseMessage(QJsonObject* jsonRequest, QTcpSocket* clientSocket)
     {
         reply = getGroups(request, requestUuid);
     }
+    else if(requestType == "auth")
+    {
+        QSqlQuery q;
+        QString qTxt = QString(
+                    "SELECT * FROM Users WHERE Username='%1' AND Password = '%2'")
+                .arg(request["username"].toString())
+                .arg(request["password"].toString() );
+        q.exec(qTxt);
+
+
+        QString FullName;
+        QSqlRecord rec = q.record();
+        QString Username = q.value(rec.indexOf("Username")).toString();
+        int recCount=0;
+        while (q.next()) {
+            recCount++;
+            int id = q.value(rec.indexOf("UserId")).toInt();
+            QString Password = q.value(rec.indexOf("Password")).toString();
+            Username = q.value(rec.indexOf("Username")).toString();
+            FullName = q.value(rec.indexOf("FullName")).toString();
+            qDebug() << Username<<Password<<FullName;
+        }
+
+        if(recCount==0) {
+            sendError(clientSocket, ErrorType::IncorrectUserOrPassword);
+            return;
+        }
+        reply = new QJsonObject();
+        reply->insert("replyType","authSuccess");
+        QJsonObject replyData;
+        replyData["FullName"] = FullName;
+        reply->insert("data",replyData);
+        authorizedClients.insert(clientSocket, Username);
+        qDebug()<<authorizedClients[clientSocket];
+    }
     else
     {
-        qDebug()<<"Unknown request:" <<requestUuid<<requestType<<request;
-        reply = new QJsonObject();
-        reply->insert("replyType","error");
-        QJsonObject replyData;
-        replyData["errorId"] = 1;
-        replyData["errorMsg"] = QString("Неизвестный тип запроса: "+requestType);
-        reply->insert("data",replyData);
+        sendError(clientSocket, ErrorType::UnknownRequest, jsonRequest);
+        return;
     }
 
     if(reply!=nullptr)
     {
-            sendMessage(clientSocket, reply);
+        sendMessage(clientSocket, reply);
     }
     qDebug()<<"parseMessage end";
 }
+
+void Server::sendError(QTcpSocket *clientSocket, ErrorType errorCode, QJsonObject* jsonRequest)
+{
+    QString requestType;
+    QJsonObject  request;
+    QJsonObject* reply = nullptr;
+    QJsonObject replyData;
+    if(jsonRequest!=nullptr) {
+
+        requestType = jsonRequest->value("requestType").toString();
+        request= jsonRequest->value("request").toObject();
+    }
+    switch (errorCode) {
+    case ErrorType::UnknownRequest:
+        qDebug()<<"Unknown request:" <<requestType<<request;
+        reply = new QJsonObject();
+        reply->insert("replyType","error");
+        replyData["errorId"] = ErrorType::UnknownRequest;
+        replyData["errorMsg"] = QString("Неизвестный тип запроса: "+requestType);
+        reply->insert("data",replyData);
+        break;
+    case ErrorType::NotAuthorized:
+        reply = new QJsonObject();
+        reply->insert("replyType","error");
+        replyData["errorId"] = ErrorType::NotAuthorized;
+        replyData["errorMsg"] = QString("Клиент не авторизован на сервере");
+        reply->insert("data",replyData);
+        break;
+    case ErrorType::IncorrectUserOrPassword:
+        reply = new QJsonObject();
+        reply->insert("replyType","error");
+        replyData["errorId"] = ErrorType::IncorrectUserOrPassword;
+        replyData["errorMsg"] = QString("Неверное имя пользователя или пароль");
+        reply->insert("data",replyData);
+        break;
+    case ErrorType::NoSuchHost:
+        reply = new QJsonObject();
+        reply->insert("replyType","error");
+        replyData["errorId"] = ErrorType::NoSuchHost;
+        replyData["errorMsg"] = QString("Клиент запросил несуществующий хост: "+
+                                        jsonRequest->value("host").toString());
+        replyData["host"] =  jsonRequest->value("host").toString();
+        reply->insert("data",replyData);
+        break;
+    case ErrorType::HostAccessDenied:
+        reply = new QJsonObject();
+        reply->insert("replyType","error");
+        replyData["errorId"] = ErrorType::HostAccessDenied;
+        replyData["errorMsg"] = QString("Отказано в доступе к хосту: "+
+                                        jsonRequest->value("host").toString());
+        replyData["host"] =  jsonRequest->value("host").toString();
+        reply->insert("data",replyData);
+        break;
+    default:
+        break;
+    }
+    if(reply!=nullptr)
+    {
+        sendMessage(clientSocket, reply);
+    }
+}
+
 
 //Использует внешний скрипт для аутентификации и получения графика с помощью WGET
 QByteArray Server::getGraphImage(QString graphid, QString period,
