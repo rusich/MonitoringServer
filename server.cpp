@@ -143,6 +143,7 @@ void Server::gotDisconnection()
 quint64 Server::sendMessage(QTcpSocket *clientSocket, QJsonObject *jsonReply)
 {
     qDebug()<<"sm";
+    qDebug()<<jsonReply->value("replyType");;
     QByteArray sendBuff;
     QDataStream out(&sendBuff, QIODevice::WriteOnly);
     QJsonDocument jsonDoc(*jsonReply);
@@ -172,7 +173,7 @@ QJsonObject* Server::getHost(QJsonObject& request, QString requestUuid = "", QTc
 
     QSqlQuery q;
     QString qTxt = QString(
-                "select AclId from ACL inner join Users on ACL.UserId = "
+                "select count(*) from ACL inner join Users on ACL.UserId = "
                 "Users.UserId inner join Hosts on ACL.HostID = Hosts.HostId "
                 "where Users.Username = '%1' AND Hosts.Host = '%2'")
             .arg(authorizedClients.value(clientSocket))
@@ -202,12 +203,13 @@ QJsonObject* Server::getHost(QJsonObject& request, QString requestUuid = "", QTc
     hostRequest["search"] = search;
     hostRequest["output"] = hostOutput;
     hostRequest["selectInterfaces"] = QJsonArray({"ip"});
-
+	qDebug()<<hostRequest;
     zabbixResult = zabbix->zabbixRequest( "host.get", &hostRequest);
-    if(zabbixResult->value("result").toObject().count()==0) {
-        sendError(clientSocket, ErrorType::NoSuchHost, &request);
-        return nullptr;
-    }
+	qDebug()<<jsonToStr(*zabbixResult);
+    //if(zabbixResult->value("result").toObject().count()==0) {
+     //   sendError(clientSocket, ErrorType::NoSuchHost, &request);
+      //  return nullptr;
+    //}
 
     QJsonObject* reply = new QJsonObject();
     reply->insert("uuid", requestUuid);
